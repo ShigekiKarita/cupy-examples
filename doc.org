@@ -1,0 +1,310 @@
+#+TITLE: NumPy 互換のGPUライブラリ CuPy の実力
+#+AUTHOR: Shigeki Karita
+#+LANGUAGE: en
+#+EMAIL: shigekikarita@gmail.com
+
+# THEMES (uncomment one block) #
+
+# org.css
+#+OPTIONS: toc:t num:3 H:4 ^:nil pri:t author:t creator:t timestamp:t email:t
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="http://gongzhitaao.org/orgcss/org.css"/>
+
+* 特徴
+
+cupy は numpy 互換の CUDA 用多次元配列ライブラリです。
+numpy の機能は膨大なので、全てが移植されてるわけではありませんが、
+基本的な多次元配列の要素ごとの演算、線形代数の演算やソートといった沢山の CUDA が得意な処理が実装されています。
+今回は、まず公式リポジトリのexamples (https://github.com/cupy/cupy/tree/master/examples) を元に、
+cupy でどんなことができるのか紹介したいと思います。
+
+* 準備
+
+Python環境はAnaconda (執筆時はPython3.6) を使って構築します。各OSでインストーラが提供されています (https://www.anaconda.com/download )。
+Linuxの場合は次のようにターミナルからanacondaで実験用の仮想環境を作ってcupy をインストールします。
+#+BEGIN_SRC bash
+# Anacondaのインストールはデフォルト設定で行う
+wget https://repo.continuum.io/archive/Anaconda3-5.0.0.1-Linux-x86_64.sh
+sh ./Anaconda3-5.0.0.1-Linux-x86_64.sh
+source $HOME/Anaconda3/bin/activate
+# cupy 用の仮想環境を作る
+conda create --name cupy
+source $HOME/Anaconda3/bin/activate cupy
+#+END_SRC
+デフォルト設定では $HOME/anaconda3 以下にインストールされます。
+次回からは最後の一行を実行すれば今回の環境を呼び出せます。
+
+次に cupy をインストールします。
+#+BEGIN_SRC bash
+# numpy などのインストール
+conda install anaconda
+# CUDAをインストールした場所を設定
+export CUDA_PATH=/usr/local/cuda
+# 執筆時はRC版を利用
+pip install cupy
+#+END_SRC
+今回は執筆時の最新版で v2.0.0 を使っています。
+
+
+* numpy との性能比較
+
+   cupy によってどれほど性能向上を示す最良の例として公式リポジトリの example があります。
+   ここもv2.0.0rc1を使っています。git を使ったダウンロード方法は次の通りです。
+#+BEGIN_SRC bash
+git clone https://github.com/cupy/cupy
+cd cupy
+git checkout -b v2.0.0rc1 origin/v2.0.0rc1
+cd examples
+#+END_SRC
+   examples ディレクトリには幾つか numpy と実行速度を比較するコードがあります。
+   実行方法は各ディレクトリにある python コードを実行するだけです。
+   実行結果(CPU: Intel 4770K, GPU: Nvidia GTX1080を使用)を表[[table:SPEED]]にまとめました。
+   GPUの初回実行はコンパイル時間が含まれるので2回目の結果を掲載しています。
+   全体で 2-76倍もの高速化ができたことが確認できます。
+
+#+CAPTION: cupy/examples以下の各コード実行時間と速度比
+#+NAME:    table:SPEED
+| example | CPU(numpy) | GPU(cupy) | Speed up |
+|---------+------------+-----------+----------|
+| gmm     | 1.87 sec   | 0.949 sec | 1.97 x   |
+| kmeans  | 9.98 sec   | 1.14 sec  | 8.75 x   |
+| cg      | 32.2 sec   | 13.0 sec  | 2.47 x   |
+| finance | 8.66 sec   | 0.114 sec | 76.0 x   | 
+
+# GPU (CuPy, Elementwise kernel):        0.014245 sec
+
+   それぞれのコードでやっていることをまとめると、こんな感じです。
+   - gmm : 混合ガウス分布による確率モデルの学習 (図[[fig:GMM]])
+   - kmeans : K平均法によるクラスタリング (図[[fig:KMEANS]])
+   - cg : 共役勾配法による最適化
+   - finance : 金融で有名な Black-Scholes 方程式の計算
+   このように numpy が得意な線形代数などの配列操作がでてくる (≒ for ループを使わない)、
+   機械学習・確率統計のコードは簡単にcupyで高速化できます。
+
+   #+CAPTION: GMM(混合ガウス分布)確率モデルの学習結果
+   #+NAME:   fig:GMM
+   [[./gmm.svg]]
+
+   #+CAPTION: K平均法クラスタリングの学習結果
+   #+NAME:   fig:KMEANS
+   [[./kmeans.svg]]
+
+
+* 記述テクニック
+
+この節では、実際にcupyを使った簡単な関数を書いていきます。そして公式examplesにおける高速化も紹介します。
+
+** numpy 互換な関数の書き方
+
+   どの関数も基本的には互換性があるので既存コード中の numpy.xxx を cupy.xxx に置き換えるだけで実行できます。
+   numpy か、cupyかを引数によって切り替えたいときは cupy.get_array_module を使います。
+   例えば、まだcupyに実装されていないnumpyっぽい中央値を求める関数はこんな感じで作れます。
+#+BEGIN_SRC python
+import cupy
+
+def median(x, axis):
+    """配列(x)の軸(axis)に沿った中央値"""
+    xp = cupy.get_array_module(x)
+    n = x.shape[axis]
+    s = xp.sort(x, axis)
+    m_odd = xp.take(s, n // 2, axis)
+    if n % 2 == 1:  # 奇数個
+        return m_odd
+    else:  # 偶数個のときは中間の値
+        m_even = xp.take(s, n // 2 - 1, axis)
+        return (m_odd + m_even) / 2
+#+END_SRC
+    次に同じように使えるか検証しましょう。cupyとnumpyの配列を相互に変換する方法はこんな感じです。
+#+BEGIN_SRC python
+# 動作例
+cx = cupy.array([[2, 1, 2, 4], [1, 2, 3, 4], [4, 3, 2, 1]])
+mc0 = median(cx, 0)  # [2, 2, 2, 4]
+mc1 = median(cx, 1)  # [2, 2.5, 2.5]
+
+nx = cupy.asnumpy(cx) # cupyからnumpyの配列に変換
+mn0 = median(nx, 0)   # cupy 配列と同じように使う
+cx = cupy.asarray(nx) # numpyからcupyの配列に変換
+#+END_SRC
+
+
+** 自作カーネルの記述と呼び出しによる高速化
+
+   cupy は numpy 互換の関数で簡単に numpy 用のコードを GPU で実行できます。
+   その一方で、自分で書いたCUDAカーネルを呼び出すことも簡単です。
+   先述の examples/finance にはElementwiseKernelクラスを使ったDSLによる自作カーネルの実装例があります。
+   筆者の環境では表[[table:SPEED]]の結果から、さらに10倍もの高速化ができました。
+   
+   さらに examples/gemm の例では NVRTC を使った外部のCUDA Kernelコード(sgemm.cu)の呼び出し例があります。
+   すでにCUDAコードの知識やライブラリをお持ちの方は、それらを手軽にPythonから使う方法として、利用を検討してはいかがでしょうか。
+
+* cupyの応用例: chainer
+
+   #+CAPTION: 今回作ったAIがPacmanをプレイしている様子
+   #+NAME:   fig:pacman-game
+   [[./game.png]]
+
+
+  AI への応用を書いて欲しいと言われたので、ニューラルネットによるゲームAIについて書きたいと思います。
+  もちろん cupy を使ったニューラルネットワークのライブラリ chainer を使います。
+  問題設定は強化学習として定式化されており、ざっくりまとめると
+  1. ゲーム画面などの観測(observation)をゲーム機などの環境(enviroment)から受け取ります。
+  2. AIのモデル(model)は観測から方策(policy)の価値(value)と確率(probability)を求めて、行動(action)を確率的に選択します。
+  3. 環境が行動に応じた、ゲームのスコアなど報酬(reward)を返します
+  以上の1-3を環境が終了させるまで繰り返し、報酬を最大化するようにモデルを学習します。実際の流れは次のコードのとおりです。
+  今回はOpenAIが提供するgymというパッケージに入ったAtariのMsPacman-v0(以下Pacman, プレイ画面は図[[fig:pacman-game]])というゲームをプレイします。
+#+BEGIN_SRC python
+# pip install gym "gym[atari]" でインストール
+import gym 
+env = gym.make("MsPacman-v0")
+
+for episode in range(100000):  # 1万回の試行
+    # 1. 環境envから初期の観測(ゲーム画面)を受け取る
+    observation = env.reset()  # ゲーム画面のRGB画像
+    values = []                
+    probs = []
+    rewards = []
+    sum_rewards = 0
+    done = False
+    while not done:
+        # 2. model による行動action(ゲームのボタン)の選択 (実装は後述)
+        action, value, prob = select_action(observation)
+        # 3 -> 1. 環境から報酬reawrd(ゲームスコア)と次の観測(ゲーム画面)をもらう。
+        observation, reward, done, info = env.step(action)
+        values.append(value)
+        probs.append(prob)
+        rewards.append(reward)
+        sum_rewards += reward
+        env.render() # ゲーム画面の描画
+    # もらったスコア rewards を最大化するように model を学習
+    train(values, probs, rewards)
+#+END_SRC
+  全体のコードは筆者のGitHubリポジトリ(https://github.com/ShigekiKarita/cupy-interface)からダウンロードできます。
+  
+** 実装の解説
+  それではchainerによるモデルの実装をみてみましょう。少し長いですが、やっていることは入力されたゲーム画像に対して、
+  次に取る行動を決める方策=確率分布 (例: [右20%, 左30%, 上40%, 下5%, 攻撃0%, 静止5%])と、その方策の良さ(価値)を推定します。
+#+BEGIN_SRC python
+# pip install chainer でインストール
+import chainer
+from chainer import Variable
+from chainer import links as L
+from chainer import functions as F
+import numpy
+
+# 行動を決定する方策を担うニューラルネットワーク
+class Policy(chainer.Chain):
+    def __init__(self, n_input, n_output, n_filter=128, n_units=128):
+        super().__init__()
+        # モデルのパラメータを登録
+        with self.init_scope():
+            # 畳み込み層
+            self.conv1 = L.Convolution2D(n_input[2], n_filter, 3, 3)
+            self.conv2 = L.Convolution2D(n_filter, n_filter, 3, 3)
+            x = numpy.empty([1, n_input[2], *n_input[0:2]],
+                            dtype=numpy.float32)
+            n_conved = self.forward_conv(x).shape[1]
+            # 全結合層
+            self.affine1 = L.Linear(n_conved, n_units)
+            self.action_head = L.Linear(n_units, n_output)
+            self.value_head = L.Linear(n_units, 1)
+
+    def forward_conv(self, x):
+        # 畳み込み層の伝搬
+        h = F.relu(self.conv1(x))
+        h = F.relu(self.conv2(h))
+        h = h.reshape(h.shape[0], -1)
+        return h
+
+    def __call__(self, x):
+        # 入力は (データ数=1, 高さ, 幅, RGB) の形をしている
+        x = x.transpose(0, 3, 1, 2)
+        h = self.forward_conv(x)
+        h = F.relu(self.affine1(h))
+        # 確率的に行動を選ぶための多項分布
+        action_probs = F.softmax(self.action_head(h))
+        # 方策の価値を推定
+        values = self.value_head(h)
+        return action_probs, values
+
+# env のゲーム画面サイズや行動の種類に応じて model を定義
+model = Policy(n_input=env.observation_space.shape,
+               n_output=env.action_space.n)
+model.to_gpu()
+# 勾配を渡すと model の最適化を行うオブジェクト
+optimizer = chainer.optimizers.Adam(alpha=0.05)
+optimizer.setup(model)
+#+END_SRC
+以上のニューラルネットワークの計算グラフ(自動微分が可能な部分)をchainerの機能でプロットしたのが図[[fig:model]]です。
+
+#+CAPTION: chainerの機能(chainer.computational_graph.build_computational_graph)で図示したPolicyクラスのネットワークの計算グラフ
+#+NAME:   fig:model
+[[./model.png]]
+
+次は、入力されたゲーム画像から行動の確率分布(=方策)を出力し、行動を選ぶ関数です。多項分布から行動のIDをサンプリングする関数numpy.random.choiceはcupyにはなかったので、
+前節にでてきた cupy.asnumpy を使って CPU で処理しています。ここでは最後の最適化に必要な勾配を求めるchainerの自動微分の機能の準備をしています。
+具体的には、cupyやnumpyの配列をVariableというクラスで包み、先ほど作ったニューラルネットワーク model に適用するだけです。
+#+BEGIN_SRC python
+def select_action(observation):
+    observation = observation.astype(numpy.float32).reshape(1, *observation.shape)
+    # chainer の自動微分用に Variable で cupy.array を包む, 出力も同じく Variable
+    probs, value = model(Variable(xp.array(observation)))
+    p = cupy.asnumpy(probs.data[0])
+    action = numpy.random.choice(len(p), p=p)
+    return action, value, probs[:, action]
+#+END_SRC
+最後に報酬を最大化するようにモデルを学習する関数です。ところでサンプリングのような操作を含む場合には chainer の自動微分は使えません。
+今回は方策勾配という方法で近似した勾配を設定することでモデルの学習をします。
+とくに今回のように方策関数と価値観数を同時に学習する手法をactor-criticと呼びます。
+#+BEGIN_SRC python
+def train(values, probs, rewards):
+    # スコア rewards に対する前処理
+    # 序盤の行動のスコアに重きを置くために割引率0.99をかけて正規化
+    R = 0
+    discounted_rewards = []
+    for r in rewards[::-1]:
+        R = r + 0.99 * R
+        discounted_rewards.insert(0, R)
+    rewards = xp.array(discounted_rewards, dtype=numpy.float32)
+    rewards = (rewards - rewards.mean()) / (rewards.std() + numpy.finfo(numpy.float32).eps)
+    rewards = Variable(rewards).reshape(1, -1)
+    values = F.concat(values)
+    probs = F.concat(probs, axis=0).reshape(1, -1)
+    optimizer.target.cleargrads()
+    # 行動のもとになった確率分布のVariableに方策勾配を登録
+    probs.grad = - (rewards.data - values.data) / probs.data
+    # サンプリングより前の関数は自動微分で勾配を求める
+    probs.backward()
+    # 推定された価値が、実際の報酬に近くなるように学習
+    loss = F.sum(F.huber_loss(values, rewards, 1.0))
+    loss.backward()
+    # 求めた勾配を使ってモデルのパラメータを更新
+    optimizer.update()
+#+END_SRC
+
+** 実験結果
+
+   #+CAPTION: numpy と cupy を使った時の実行速度(フレーム/秒)
+   #+NAME: table:pacman-speed
+   |               | numpy | cupy | speedup |
+   |---------------+-------+------+---------|
+   | select_action |  74.5 |  327 | 4.39 x  |
+   | train         |  19.1 |  118 | 6.18 x  |
+  
+   先ほど説明しました、MsPacman-v0における行動選択(select_action)とモデルの学習の実行速度を表[[table:pacman-speed]]にまとめました。
+   それぞれ、4-6倍の高速化になっています。つまりnumpyでは丸一日かかるようなAIの学習も4時間程度で終わってしまいます。
+   図[[fig:pacman]]に4時間程度、学習させたゲームAIのスコアの変化を描画しました。
+   最初のランダムなモデルのスコア(300前後)から、500回の学習で約二倍のスコアに到達しました。
+
+   #+CAPTION: Pacmanの学習結果。見やすくするために、幅10の移動平均で平滑化をかけてます。
+   #+NAME:   fig:pacman
+   [[./pacman.svg]]
+
+   OpenAIのgymパッケージにはまだ沢山のゲーム環境があり、
+   今回のコードはMsPacman-v0以外のゲーム(SpaceInvaders-v0、Assault-v0など)でも動作します。
+   さらに公式ページ(https://gym.openai.com/read-only.html)では他の人が書いたハイスコアのコードを見ることもできます。
+
+
+** おわりに
+
+   今回はcupyによる簡単ながら高速なGPUプログラムを紹介しました。
+   GPUをお持ちでない方でも、Amazon EC2など手軽にGPUがレンタルできます。
+   今回紹介したコードは全て簡単に再現できますので、みなさんもぜひお試しください。
