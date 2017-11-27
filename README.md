@@ -29,6 +29,10 @@ python pole.py | tee plot.log # スコアが200に到達すればOK
 python plot_pole.py #　学習グラフ pole.pdf ができます
 ```
 
+![pole](pole.svg)
+
+合格ライン(オレンジ)をスコア(青)が超えるようになればOK
+
 ## chainerの例(atari)
 
 実際にPacman用のゲームAIを学習してみます。
